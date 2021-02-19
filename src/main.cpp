@@ -8,6 +8,16 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <ArduinoOTA.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
+#include <timer.hpp>
+#include <stdio.h>
+
+#define UTC_TIMEZONE 2
+#define UTC_TIMEZONE_SEC ((UTC_TIMEZONE - 1) * 60 * 60)
+
+#define DARKMODE_START 22
+#define DARKMODE_END 6
 //#define ENABLE_GxEPD2_GFX 0
 
 // #include <GxEPD2_BW.h>
@@ -29,7 +39,15 @@ ESP8266WebServer server(80);
 DallasTemperature sensors(&oneWire);
 //GxEPD2_BW<GxEPD2_154, GxEPD2_154::HEIGHT>display(GxEPD2_154(/*CS=D8*/ SS, /*DC=D3*/ 0, /*RST=D4*/ 2, /*BUSY=D2*/ 4));
 
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", UTC_TIMEZONE_SEC);
+
 void handleSetApi();
+void handleGetApi();
+void handleBacklight();
+void backlightTimerHandler(long time);
+void printTempLine();
+void printHeaderLine();
 //void drawFullDisplay();
 
 float tempOut = 0.0;
@@ -38,6 +56,8 @@ float tempIn = 0.0;
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
+long timerTime = 0;
+Timer backlightTimer(timerTime, 100, backlightTimerHandler);
 
 void setup() {
   // put your setup code here, to run once:
@@ -71,23 +91,36 @@ void setup() {
   if (MDNS.begin("weather")) {
     Serial.println("MDNS responder started");
   }
-  server.on("/api/set",handleSetApi) ;
-  server.begin();
-  //display.init(115200);
+  ArduinoOTA.begin();
   
+  timeClient.begin();
+  timeClient.update();
+  backlightTimerHandler(0);
+  
+  server.on("/api/set",handleSetApi);
+  server.on("/api/get", handleGetApi);
+  server.on("/api/backlight", handleBacklight);
+  server.begin();
+  delay(500);
+  lcd.clear();
+  //display.init(115200);
+  printHeaderLine();
 }
 
 void loop() {
+  timerTime++;
+  timeClient.update();
+  backlightTimer.run(timerTime);
   // put your main code here, to run repeatedly:
   //drawFullDisplay()
   sensors.requestTemperatures();
   float tmp = sensors.getTempCByIndex(0);
   if (tmp != tempIn) {
     tempIn = tmp;
-    lcd.setCursor(0,0);
-    lcd.print("T.in: " + String(tempIn));
+    printTempLine();
   }
   server.handleClient();
+  ArduinoOTA.handle();
 }
 
 void handleSetApi() {
@@ -103,10 +136,42 @@ void handleSetApi() {
     Serial.println(humiOut);
     server.send(200,"text/plain","OK");
   }
-  lcd.setCursor(0,1);
-  lcd.print("T:" + String(tempOut) + " F:" + String(humiOut) + "%");
+  printTempLine();
 }
 
+void handleGetApi() {
+  server.send(200, "application/json", "{\"temp-in\":" + String(tempIn) + ",\"temp-out\":" + String(tempOut) + ",\"humi-out\":" + String(humiOut) + "}");
+}
+
+void printHeaderLine() {
+  lcd.setCursor(0,0);
+  lcd.print("In    Out   Luft");
+}
+void printTempLine() {
+  lcd.setCursor(0,1);
+  lcd.printf("%04.1f  %04.1f  %04.1f", tempIn, tempOut, humiOut);
+}
+
+void handleBacklight() {
+  if (server.hasArg("state")) {
+    lcd.setBacklight(server.arg("state").toInt());
+    Serial.println("set backlight to " + server.arg("state"));
+    server.send(200, "text/plain", "OK");
+  }
+  if (server.hasArg("time")) {
+    server.send(200, "text/plain", timeClient.getFormattedTime());
+  }
+}
+
+void backlightTimerHandler(long tickTime) {
+  
+  int time = timeClient.getHours();
+  if (time > DARKMODE_START || time < DARKMODE_END) {
+    lcd.noBacklight();
+  } else {
+    lcd.backlight();
+  }
+}
 // const char HelloWorld[] = "Hello World!";
 // void drawFullDisplay() {
 //   Serial.println("helloWorld");
